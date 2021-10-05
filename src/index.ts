@@ -59,7 +59,7 @@ function downloadAllFiles(
                 }
               )
               .on('downloadProgress', progress => {
-                //console.log(progress.percent);
+                console.log(element.fileName, progress.percent);
               })
               .on('end', () => {
                 console.log(element.fileName);
@@ -80,7 +80,7 @@ async function uploadFiles(
   filesPath: string[],
   config: Partial<ContainerSettings> = {}
 ) {
-  const MAX_BODY_LENGTH = 50 * 1024 * 1024; // 50MO
+  const CHUNK_SIZE = 50 * 1024 * 1024; // 50MO
   console.log(filesPath);
   const files = await Promise.all(
     filesPath.map(async file => {
@@ -118,42 +118,46 @@ async function uploadFiles(
     }
   );
   await Promise.all(
-    response.body.filesUUID.map(
-      (file, index) =>
-        new Promise<Response<string>[]>(resolve => {
-          const stream = fs.createReadStream(filesPath[index], {
-            highWaterMark: MAX_BODY_LENGTH,
-          });
-          const chunks: CancelableRequest<Response<string>>[] = [];
-          stream.on('data', async chunk => {
-            const done = chunk.length < stream.readableHighWaterMark;
-            const part =
-              Math.ceil(stream.bytesRead / stream.readableHighWaterMark) - 1;
-            chunks.push(
-              got
-                .post<string>(
-                  `https://${response.body.uploadHost}/api/uploadChunk/${
-                    response.body.container.UUID
-                  }/${file}/${part}/${done ? 1 : 0}`,
-                  {
-                    body: chunk,
-                    responseType: 'json',
-                    headers: {
-                      'User-Agent': 'swisstransfer-webext/1.0',
-                    },
-                  }
-                )
-                .on('response', () => {
-                  console.log(filesPath[index], part);
-                })
-            );
-          });
-          stream.on('end', async () => {
-            resolve(await Promise.all(chunks));
-            console.log(filesPath[index]);
-          });
-        })
-    )
+    response.body.filesUUID.map(async (file, index) => {
+      const fd = await fs.promises.open(filesPath[index], 'r');
+      const fileSize = (await fd.stat()).size;
+      const nbChunks = Math.ceil(fileSize / CHUNK_SIZE);
+      const chunks: CancelableRequest<Response<string>>[] = [];
+      for (let i = 0; i < nbChunks; ++i) {
+        const start = i * CHUNK_SIZE;
+        const done = start + CHUNK_SIZE >= fileSize;
+        const end = done ? fileSize : start + CHUNK_SIZE;
+        chunks.push(
+          got
+            .post<string>(
+              `https://${response.body.uploadHost}/api/uploadChunk/${
+                response.body.container.UUID
+              }/${file}/${i}/${done ? 1 : 0}`,
+              {
+                body: fs.createReadStream('', {
+                  fd,
+                  start,
+                  end,
+                  autoClose: false,
+                  emitClose: false,
+                }),
+                responseType: 'json',
+                headers: {
+                  'Content-Length': `${end - start}`,
+                  'User-Agent': 'swisstransfer-webext/1.0',
+                },
+              }
+            )
+            .on('uploadProgress', p => console.log(i, p.percent))
+            .on('response', () => {
+              console.log(filesPath[index], i);
+            })
+        );
+      }
+      await Promise.all(chunks);
+      await fd.close();
+      console.log(filesPath[index]);
+    })
   );
   return got.post<ResponseComplete[]>(
     'https://www.swisstransfer.com/api/uploadComplete',
@@ -169,7 +173,10 @@ async function uploadFiles(
     }
   );
 }
-uploadFiles([path.join(__dirname, '../tmp/cervin.jpg')]).then(response => {
+uploadFiles([
+  path.join(__dirname, '../tmp/cervin.jpg'),
+  path.join(__dirname, '../tmp/big.zip'),
+]).then(response => {
   response.body.forEach(link => {
     console.log(`https://www.swisstransfer.com/d/${link.linkUUID}`);
     downloadAllFiles(
