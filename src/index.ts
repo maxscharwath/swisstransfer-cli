@@ -1,51 +1,85 @@
-import * as FormData from 'form-data';
 import * as fs from 'fs';
 import {
+  ContainerSettings,
   IsPasswordValid,
+  RequestContainer,
   ResponseComplete,
   ResponseContainer,
 } from './types/Types';
 import * as path from 'path';
 import got, {CancelableRequest, Response} from 'got';
 
-function downloadAllFiles(UUID: string, dist: string) {
-  const body = new FormData();
-  body.append('linkUUID', UUID);
+function downloadAllFiles(
+  options: {linkUUID: string; password?: string},
+  dist: string
+) {
   got
-    .post<IsPasswordValid>(
+    .post<IsPasswordValid | false>(
       'https://www.swisstransfer.com/api/isPasswordValid',
       {
-        body,
+        json: options,
         responseType: 'json',
         headers: {
           'User-Agent': 'swisstransfer-webext/1.0',
-          'Content-Length': '' + body.getLengthSync(),
-          ...body.getHeaders(),
         },
       }
     )
     .then(response => {
-      response.body.container.files.forEach(element => {
-        element.UUID;
-        got.stream
-          .get(
-            `https://dl-nd365nkd.swisstransfer.com/api/download/${UUID}/${element.UUID}`,
+      if (response.body === false) {
+        console.log('wrong password');
+        return;
+      }
+      return Promise.allSettled(
+        response.body.container.files.map(async element => {
+          const {body: token} = await got.post<string>(
+            'https://www.swisstransfer.com/api/generateDownloadToken',
             {
+              json: {
+                password: options.password,
+                containerUUID: element.containerUUID,
+                fileUUID: element.UUID,
+              },
+              responseType: 'json',
               headers: {
                 'User-Agent': 'swisstransfer-webext/1.0',
               },
             }
-          )
-          .on('downloadProgress', progress => {})
-          .pipe(fs.createWriteStream(path.join(dist, element.fileName)));
-      });
+          );
+          await new Promise<void>(resolve => {
+            got.stream
+              .get(
+                `https://www.swisstransfer.com/api/download/${options.linkUUID}/${element.UUID}`,
+                {
+                  searchParams: {
+                    token,
+                  },
+                  headers: {
+                    'User-Agent': 'swisstransfer-webext/1.0',
+                  },
+                }
+              )
+              .on('downloadProgress', progress => {
+                //console.log(progress.percent);
+              })
+              .on('end', () => {
+                console.log(element.fileName);
+                resolve();
+              })
+              .pipe(fs.createWriteStream(path.join(dist, element.fileName)));
+          });
+        })
+      );
     })
+    .then(() => console.log('download done'))
     .catch(error => {
       console.log('error', error);
     });
 }
 
-async function uploadFiles(filesPath: string[]) {
+async function uploadFiles(
+  filesPath: string[],
+  config: Partial<ContainerSettings> = {}
+) {
   const MAX_BODY_LENGTH = 50 * 1024 * 1024; // 50MO
   console.log(filesPath);
   const files = await Promise.all(
@@ -60,17 +94,18 @@ async function uploadFiles(filesPath: string[]) {
   const response = await got.post<ResponseContainer>(
     'https://www.swisstransfer.com/api/containers',
     {
-      json: {
+      json: <RequestContainer>{
         authorEmail: '',
         duration: 30,
-        files: JSON.stringify(files),
         lang: 'fr_CH',
         message: '',
         numberOfDownload: 200,
-        numberOfFile: files.length,
         password: '',
-        recaptcha: 'nope',
         recipientsEmails: '[]',
+        ...config,
+        files: JSON.stringify(files),
+        numberOfFile: files.length,
+        recaptcha: 'nope',
         sizeOfUpload: files.reduce(
           (prevValue, currValue) => prevValue + currValue.size,
           0
@@ -120,28 +155,26 @@ async function uploadFiles(filesPath: string[]) {
         })
     )
   );
-  const body = new FormData();
-  body.append('UUID', response.body.container.UUID);
-  body.append('lang', 'fr_CH');
   return got.post<ResponseComplete[]>(
     'https://www.swisstransfer.com/api/uploadComplete',
     {
-      body,
+      json: {
+        UUID: response.body.container.UUID,
+        lang: 'fr_CH',
+      },
       responseType: 'json',
       headers: {
         'User-Agent': 'swisstransfer-webext/1.0',
-        'Content-Length': '' + body.getLengthSync(),
-        ...body.getHeaders(),
       },
     }
   );
 }
-uploadFiles([
-  path.join(__dirname, '../tmp/big.zip'),
-  path.join(__dirname, '../tmp/cervin.jpg'),
-]).then(response => {
+uploadFiles([path.join(__dirname, '../tmp/cervin.jpg')]).then(response => {
   response.body.forEach(link => {
     console.log(`https://www.swisstransfer.com/d/${link.linkUUID}`);
-    downloadAllFiles(link.linkUUID, path.join(__dirname, '../dist'));
+    downloadAllFiles(
+      {linkUUID: link.linkUUID},
+      path.join(__dirname, '../dist')
+    );
   });
 });

@@ -39,18 +39,21 @@ export type IsPasswordValid = {
   };
 };
 
-export type RequestContainer = {
+export type ContainerSettings = {
   duration: number;
   authorEmail: string;
-  password: string;
+  password: string; // PASSWORD NEED TO BE MORE THAN 6 CHARACTERS
   message: string;
-  sizeOfUpload: number;
   numberOfDownload: number;
-  numberOfFile: number;
   lang: string;
+  recipientsEmails: string;
+};
+
+export type RequestContainer = ContainerSettings & {
+  sizeOfUpload: number;
+  numberOfFile: number;
   recaptcha: string;
   files: string;
-  recipientsEmails: string;
 };
 
 export type ResponseContainer = {
