@@ -1,6 +1,7 @@
 {
   "extends": "./node_modules/gts/",
   "rules": {
-    "max-len": [2, {"code": 120, "ignoreUrls": true}]
+    "max-len": [2, {"code": 120, "ignoreUrls": true}],
+    "sort-keys": ["error", "asc", {"caseSensitive": true, "natural": false, "minKeys": 2}]
   }
 }
