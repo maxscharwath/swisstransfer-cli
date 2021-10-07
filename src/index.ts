@@ -1,26 +1,38 @@
 import * as path from 'path';
-import SwissTransferUploader from './core/SwissTransferUploader';
+import SwissTransferUploader, {ProgressChildren} from './core/SwissTransferUploader';
 import * as cliProgress from 'cli-progress';
+import * as fs from 'fs';
 
+const srcFile = path.join(__dirname, '..');
+const files = fs.readdirSync(srcFile).map(file => path.join(srcFile, file));
 const uploader = new SwissTransferUploader();
-uploader.addFiles(path.join(__dirname, '../tmp/cervin.jpg'));
-uploader.on('addFileError', console.log);
-const bar = new cliProgress.SingleBar(
+uploader.addFiles(...files);
+const multiBar = new cliProgress.MultiBar(
   {
-    format: '{bar} {percentage}% | ETA: {eta}s',
+    format: '{bar} {percentage}% | ETA: {eta}s | {name}',
   },
   cliProgress.Presets.shades_classic
 );
-bar.start(1, 0);
+const barMap = new Map<string, cliProgress.SingleBar>();
+
+function progressBarChildren(progress: ProgressChildren<{name: string}>) {
+  let bar = barMap.get(progress.name);
+  if (!bar) {
+    bar = multiBar.create(1, 0);
+    barMap.set(progress.name, bar);
+  }
+  bar.update(progress.percent, {name: progress.name});
+  progress.children?.forEach(child => progressBarChildren(child));
+}
+
 uploader.on('uploadProgress', progress => {
-  const p = progress();
-  bar.update(p.percent);
+  progressBarChildren(progress());
 });
 uploader.on('done', results => {
-  bar.stop();
+  multiBar.stop();
   results.forEach(res => {
     console.log(`https://www.swisstransfer.com/d/${res.linkUUID}`);
   });
 });
 
-// uploader.upload();
+uploader.upload();

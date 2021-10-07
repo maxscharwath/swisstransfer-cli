@@ -1,15 +1,15 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import got, {CancelableRequest, Got, Progress, Response} from 'got';
+import got, {CancelableRequest, Got, Progress, RequestError, Response} from 'got';
 import {EventEmitter} from './Event';
 
 type UploaderConfig = {
-  duration: number;
+  duration: 1 | 7 | 15 | 30;
   authorEmail: string;
   password: string; // PASSWORD NEED TO BE MORE THAN 6 CHARACTERS
   message: string;
-  numberOfDownload: number;
-  lang: string;
+  numberOfDownload: 1 | 20 | 100 | 200 | 250;
+  lang: 'fr_FR' | 'en_GB' | 'it_IT' | 'es_ES' | 'de_DE';
   recipientsEmails: string;
 };
 
@@ -43,7 +43,7 @@ type ResponseContainer = {
   filesUUID: string[];
 };
 
-type ResponseComplete = {
+export type ResponseComplete = {
   linkUUID: string;
   containerUUID: string;
   userEmail?: string;
@@ -54,8 +54,13 @@ type ResponseComplete = {
   isMailSent: number;
 };
 
+export type ProgressData<T extends {} = {}> = Progress & T;
+export type ProgressChildren<T extends {} = {}> = ProgressData<T> & {
+  children?: ProgressChildren<T>[];
+};
+
 type File = {
-  uploadProgress: Progress[];
+  uploadProgress: ProgressData<{name: string}>[];
   path: string;
   stat: fs.Stats;
   meta: {
@@ -65,7 +70,7 @@ type File = {
 };
 
 export default class SwissTransferUploader extends EventEmitter<{
-  uploadProgress: () => Required<Progress>;
+  uploadProgress: () => ProgressChildren<{name: string}>;
   fileChunkUploaded: File & {part: number};
   fileUploaded: File;
   addFile: File;
@@ -73,6 +78,7 @@ export default class SwissTransferUploader extends EventEmitter<{
     filePath: string;
     error: Error;
   };
+  requestError: RequestError;
   done: ResponseComplete[];
 }> {
   static readonly HOSTNAME = 'https://www.swisstransfer.com';
@@ -83,11 +89,38 @@ export default class SwissTransferUploader extends EventEmitter<{
   #files: File[] = [];
   #allFilesProcessing: Promise<PromiseSettledResult<File>[]>[] = [];
 
-  #getUploadSize(): number {
-    return this.#files.reduce((prev, curr) => prev + curr.stat.size, 0);
+  constructor(config: Partial<UploaderConfig> = {}) {
+    super();
+    if (config.password && config.password.length < 6) {
+      throw new Error('Password must be at least 6 characters long');
+    }
+    this.#config = {
+      authorEmail: '',
+      duration: 7,
+      lang: 'en_GB',
+      message: '',
+      numberOfDownload: 20,
+      password: '',
+      recipientsEmails: '[]',
+      ...config,
+    };
+    this.#client = got.extend({
+      headers: {
+        'User-Agent': 'swisstransfer-webext/1.0',
+      },
+      hooks: {
+        beforeError: [
+          error => {
+            this.emit('requestError', error);
+            return error;
+          },
+        ],
+      },
+      prefixUrl: SwissTransferUploader.HOSTNAME,
+    });
   }
 
-  static #progressMean(progresses: Progress[]): Required<Progress> {
+  static #progressMean<T extends {} = {}>(progresses: ProgressChildren<T>[]): ProgressChildren<T> {
     const result = progresses.reduce(
       (p, c) => {
         return {
@@ -101,76 +134,34 @@ export default class SwissTransferUploader extends EventEmitter<{
       }
     );
     return {
+      children: progresses,
       ...result,
-      percent: result.transferred / result.total,
-    };
+      percent: result.transferred / result.total || 0,
+    } as ProgressChildren<T>;
   }
 
-  constructor(config: Partial<UploaderConfig> = {}) {
-    super();
-    if (config.password && config.password.length < 6) {
-      throw new Error('Password must be at least 6 characters long');
-    }
-    this.#config = {
-      authorEmail: '',
-      duration: 30,
-      lang: 'fr_CH',
-      message: '',
-      numberOfDownload: 200,
-      password: '',
-      recipientsEmails: '[]',
-      ...config,
-    };
-    this.#client = got.extend({
-      headers: {
-        'User-Agent': 'swisstransfer-webext/1.0',
-      },
-      prefixUrl: SwissTransferUploader.HOSTNAME,
-    });
-  }
-
-  public async addFiles(...filesPath: string[]): Promise<(PromiseSettledResult<File> & {filePath: string})[]> {
+  public addFiles(...filesPath: string[]) {
     const filesProcessing: Promise<PromiseSettledResult<File>[]> = Promise.allSettled(
       filesPath.map(filePath => {
-        const fileProcessing = (async () => {
-          const fileStat = await fs.promises.stat(filePath);
-          if (!fileStat.isFile()) {
-            throw new Error('Must be a file');
-          }
-          if (this.#getUploadSize() + fileStat.size > SwissTransferUploader.MAX_UPLOAD_SIZE) {
-            throw new Error('Max upload size exceeded');
-          }
-          return {
-            meta: {
-              name: path.basename(filePath),
-              size: fileStat.size,
-            },
-            path: filePath,
-            stat: fileStat,
-            uploadProgress: [],
-          };
-        })();
-        fileProcessing.then(file => {
-          this.#files.push(file);
-          this.emit('addFile', file);
-        });
-        fileProcessing.catch(error => {
-          this.emit('addFileError', {
-            error,
-            filePath: filePath,
+        return this.#processFile(filePath)
+          .then(file => {
+            this.#files.push(file);
+            this.emit('addFile', file);
+            return file;
+          })
+          .catch(error => {
+            this.emit('addFileError', {
+              error,
+              filePath: filePath,
+            });
+            return error;
           });
-        });
-        return fileProcessing;
       })
     );
     this.#allFilesProcessing.push(filesProcessing);
-    return (await filesProcessing).map((result, index) => ({
-      ...result,
-      filePath: filesPath[index],
-    }));
   }
 
-  public async upload() {
+  public async upload(): Promise<ResponseComplete[]> {
     await Promise.allSettled(this.#allFilesProcessing).finally(() => (this.#allFilesProcessing = []));
     if (this.#files.length === 0) {
       throw new Error('Add at least one file');
@@ -214,7 +205,7 @@ export default class SwissTransferUploader extends EventEmitter<{
                 responseType: 'json',
               })
               .on('uploadProgress', p => {
-                file.uploadProgress[i] = p;
+                file.uploadProgress[i] = {...p, name: `${file.meta.name} - part ${i}`};
                 this.emit('uploadProgress', this.getUploadProgress.bind(this));
               })
               .on('response', () => {
@@ -227,20 +218,47 @@ export default class SwissTransferUploader extends EventEmitter<{
         this.emit('fileUploaded', file);
       })
     );
-    return this.#client
-      .post<ResponseComplete[]>('api/uploadComplete', {
-        json: {
-          UUID: containerResponse.container.UUID,
-          lang: this.#config.lang,
-        },
-        responseType: 'json',
-      })
-      .on<Response<ResponseComplete[]>>('response', response => this.emit('done', response.body));
+
+    const {body} = await this.#client.post<ResponseComplete[]>('api/uploadComplete', {
+      json: {
+        UUID: containerResponse.container.UUID,
+        lang: this.#config.lang,
+      },
+      responseType: 'json',
+    });
+    this.emit('done', body);
+    return body;
   }
 
-  public getUploadProgress(): Required<Progress> {
+  public getUploadProgress(): ProgressChildren<{name: string}> {
     return SwissTransferUploader.#progressMean(
-      this.#files.map(file => SwissTransferUploader.#progressMean(file.uploadProgress))
+      this.#files.map(file => ({
+        ...SwissTransferUploader.#progressMean(file.uploadProgress),
+        name: file.meta.name,
+      }))
     );
+  }
+
+  async #processFile(filePath: string) {
+    const fileStat = await fs.promises.stat(filePath);
+    if (!fileStat.isFile()) {
+      throw new Error('Must be a file');
+    }
+    if (this.#getUploadSize() + fileStat.size > SwissTransferUploader.MAX_UPLOAD_SIZE) {
+      throw new Error('Max upload size exceeded');
+    }
+    return {
+      meta: {
+        name: path.basename(filePath),
+        size: fileStat.size,
+      },
+      path: filePath,
+      stat: fileStat,
+      uploadProgress: [],
+    };
+  }
+
+  #getUploadSize(): number {
+    return this.#files.reduce((prev, curr) => prev + curr.stat.size, 0);
   }
 }
