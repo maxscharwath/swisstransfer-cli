@@ -180,7 +180,6 @@ export default class SwissTransferUploader extends EventEmitter<{
     await Promise.all(
       containerResponse.filesUUID.map(async (fileUUID, index) => {
         const file = this.#files[index];
-        const fd = await fs.promises.open(file.path, 'r');
         const fileSize = file.stat.size;
         const nbChunks = Math.ceil(fileSize / SwissTransferUploader.CHUNK_SIZE);
         const chunks: CancelableRequest<Response<string>>[] = [];
@@ -191,11 +190,8 @@ export default class SwissTransferUploader extends EventEmitter<{
           chunks.push(
             this.#client
               .post<string>(`api/uploadChunk/${containerResponse.container.UUID}/${fileUUID}/${i}/${done ? 1 : 0}`, {
-                body: fs.createReadStream('', {
-                  autoClose: false,
-                  emitClose: false,
+                body: fs.createReadStream(file.path, {
                   end,
-                  fd,
                   start,
                 }),
                 headers: {
@@ -214,7 +210,6 @@ export default class SwissTransferUploader extends EventEmitter<{
           );
         }
         await Promise.all(chunks);
-        await fd.close();
         this.emit('fileUploaded', file);
       })
     );
